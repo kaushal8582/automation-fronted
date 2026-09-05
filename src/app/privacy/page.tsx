@@ -6,8 +6,8 @@ const sections: { title: string; body: React.ReactNode }[] = [
     title: "1. Who we are",
     body: (
       <>
-        MastPlayer (&quot;we&quot;, &quot;us&quot;, or &quot;our&quot;) is a social media publishing and
-        scheduling service available at{" "}
+        MastPlayer is operated by Kaushal Kumar. MastPlayer (&quot;we&quot;, &quot;us&quot;, or
+        &quot;our&quot;) is a social media publishing and scheduling service available at{" "}
         <a
           href="https://automation.mastplayer.in"
           className="text-foreground underline underline-offset-2"
