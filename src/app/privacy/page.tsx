@@ -179,10 +179,10 @@ const sections: { title: string; body: React.ReactNode }[] = [
       <>
         For privacy questions or data requests, contact:{" "}
         <a
-          href="mailto:kaushalkumar02918@gmail.com"
+          href="mailto:support@mastplayer.in"
           className="text-foreground underline underline-offset-2"
         >
-          kaushalkumar02918@gmail.com
+          support@mastplayer.in
         </a>
         .
       </>

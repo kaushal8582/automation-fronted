@@ -456,6 +456,7 @@ export default function LandingPage() {
             <div className="text-muted-foreground mt-3 flex flex-col gap-2">
               <Link href="/privacy">Privacy</Link>
               <Link href="/terms">Terms</Link>
+              <a href="mailto:support@mastplayer.in">support@mastplayer.in</a>
             </div>
           </div>
         </div>
