@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AppShell } from "@/components/layout/app-shell";
 import { EmptyState } from "@/components/shared/empty-state";
+import { MediaPreview } from "@/components/shared/media-preview";
 import { PageHeader } from "@/components/shared/page-header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -449,52 +450,45 @@ function MediaLibraryContent() {
           ) : null}
 
           {!empty ? (
-            <ul className="space-y-3">
+            <ul className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {media.map((item: MediaAsset) => (
-                <li
-                  key={item.id}
-                  className="flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="flex min-w-0 items-start gap-3">
+                <li key={item.id} className="relative">
+                  <div className="absolute top-3 left-3 z-10">
                     <input
                       type="checkbox"
-                      className="mt-1 h-4 w-4"
+                      className="bg-background h-4 w-4 rounded border shadow"
                       checked={selectedIds.has(item.id)}
                       onChange={() => toggleSelect(item.id)}
+                      aria-label={`Select ${item.originalFilename}`}
                     />
-                    <div className="min-w-0 space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="truncate font-medium">{item.originalFilename}</p>
-                        <Badge variant="outline">{item.type}</Badge>
-                        <Badge variant={item.status === "ready" ? "default" : "secondary"}>
-                          {item.status}
-                        </Badge>
-                      </div>
-                      <p className="text-muted-foreground text-xs">
-                        {formatBytes(item.fileSize)} · {item.mimeType}
-                      </p>
-                      <a
-                        href={item.publicUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs break-all underline"
-                      >
-                        {item.publicUrl}
-                      </a>
-                    </div>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={deleteMutation.isPending}
-                    onClick={() => {
-                      if (confirm(`Delete ${item.originalFilename}?`)) {
-                        deleteMutation.mutate(item.id);
-                      }
-                    }}
-                  >
-                    Delete
-                  </Button>
+                  <MediaPreview
+                    publicUrl={item.publicUrl}
+                    type={item.type}
+                    filename={item.originalFilename}
+                    fileSize={item.fileSize}
+                    selected={selectedIds.has(item.id)}
+                  />
+                  <div className="mt-2 flex items-center justify-between gap-2 px-0.5">
+                    <div className="flex flex-wrap gap-1.5">
+                      <Badge variant="outline">{item.type}</Badge>
+                      <Badge variant={item.status === "ready" ? "default" : "secondary"}>
+                        {item.status}
+                      </Badge>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={deleteMutation.isPending}
+                      onClick={() => {
+                        if (confirm(`Delete ${item.originalFilename}?`)) {
+                          deleteMutation.mutate(item.id);
+                        }
+                      }}
+                    >
+                      Delete
+                    </Button>
+                  </div>
                 </li>
               ))}
             </ul>

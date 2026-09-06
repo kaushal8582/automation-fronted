@@ -8,13 +8,14 @@ import { Search } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/layout/app-shell";
 import { AccountAvatar } from "@/components/shared/account-avatar";
+import { MediaPreview } from "@/components/shared/media-preview";
 import { PageHeader } from "@/components/shared/page-header";
 import { PlatformIcon } from "@/components/shared/platform-icon";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { listMedia, formatBytes, type MediaAsset } from "@/lib/media-api";
+import { listMedia, type MediaAsset } from "@/lib/media-api";
 import { createPost, PostsApiError } from "@/lib/posts-api";
 import { accountLabel, listSocialAccounts, type SocialAccount } from "@/lib/social-api";
 import { cn } from "@/lib/utils";
@@ -237,27 +238,22 @@ function CreatePostContent() {
               <CardTitle>1. Media</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <Label htmlFor="media">Ready video</Label>
-              <select
-                id="media"
-                className="border-input bg-background h-10 w-full rounded-lg border px-3 text-sm"
-                value={mediaId}
-                onChange={(e) => setMediaId(e.target.value)}
-                disabled={mediaQuery.isLoading}
-              >
-                <option value="">Select a ready video…</option>
-                {readyVideos.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.originalFilename} ({formatBytes(m.fileSize)})
-                  </option>
-                ))}
-              </select>
-              {selectedMedia ? (
-                <div className="rounded-xl border bg-muted/30 p-3 text-sm">
-                  <p className="font-medium">{selectedMedia.originalFilename}</p>
-                  <p className="text-muted-foreground text-xs">
-                    {formatBytes(selectedMedia.fileSize)} · {selectedMedia.mimeType}
-                  </p>
+              {mediaQuery.isLoading ? (
+                <p className="text-muted-foreground text-sm">Loading media…</p>
+              ) : null}
+              {readyVideos.length > 0 ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {readyVideos.map((m) => (
+                    <MediaPreview
+                      key={m.id}
+                      publicUrl={m.publicUrl}
+                      type={m.type}
+                      filename={m.originalFilename}
+                      fileSize={m.fileSize}
+                      selected={mediaId === m.id}
+                      onSelect={() => setMediaId(m.id)}
+                    />
+                  ))}
                 </div>
               ) : null}
               {readyVideos.length === 0 && !mediaQuery.isLoading ? (

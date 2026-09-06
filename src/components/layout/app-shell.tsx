@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import {
+  Activity,
   CalendarDays,
   FileVideo,
   LayoutDashboard,
@@ -28,6 +29,7 @@ const NAV = [
   { href: "/calendar", label: "Calendar", icon: CalendarDays },
   { href: "/posts", label: "Posts", icon: FileVideo },
   { href: "/media", label: "Media Library", icon: Library },
+  { href: "/activity", label: "Activity", icon: Activity },
   { href: "/accounts", label: "Accounts", icon: Users },
 ];
 

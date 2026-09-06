@@ -5,11 +5,13 @@ import { useParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AppShell } from "@/components/layout/app-shell";
+import { MediaPreview } from "@/components/shared/media-preview";
 import { PlatformIcon } from "@/components/shared/platform-icon";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { listMedia } from "@/lib/media-api";
 import {
   cancelPost,
   getPost,
@@ -76,6 +78,14 @@ function PostDetailContent() {
     queryFn: () => getPostMetrics(id),
     enabled: Boolean(id) && hasPublishedDestinations(data?.post.status ?? ""),
   });
+
+  const mediaQuery = useQuery({
+    queryKey: ["media"],
+    queryFn: listMedia,
+    enabled: Boolean(data?.post.mediaId),
+  });
+
+  const postMedia = mediaQuery.data?.media.find((m) => m.id === data?.post.mediaId);
 
   const refreshMetricsMutation = useMutation({
     mutationFn: () => refreshPostMetrics(id),
@@ -156,6 +166,17 @@ function PostDetailContent() {
 
       {data ? (
         <>
+          {postMedia ? (
+            <MediaPreview
+              variant="inline"
+              publicUrl={postMedia.publicUrl}
+              type={postMedia.type}
+              filename={postMedia.originalFilename}
+              fileSize={postMedia.fileSize}
+              className="max-w-xl"
+            />
+          ) : null}
+
           <Card className="shadow-none">
             <CardContent className="grid gap-3 pt-1 text-sm sm:grid-cols-2">
               <p>
@@ -218,6 +239,16 @@ function PostDetailContent() {
                     <p className="text-muted-foreground mt-2 font-mono text-xs">
                       Post ID: {d.platformPostId}
                     </p>
+                  ) : null}
+                  {d.platformPostUrl ? (
+                    <a
+                      href={d.platformPostUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-primary mt-1 inline-block text-xs underline underline-offset-2"
+                    >
+                      Open on {d.platform}
+                    </a>
                   ) : null}
                   {d.publishedAt ? (
                     <p className="text-muted-foreground mt-1 text-xs">
