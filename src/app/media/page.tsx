@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState, type DragEvent } from "react";
+import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AppShell } from "@/components/layout/app-shell";
@@ -28,6 +29,7 @@ import {
   uploadToR2,
   type MediaAsset,
 } from "@/lib/media-api";
+import { saveBatchMediaIds } from "@/lib/batch-media";
 
 const MAX_BATCH_FILES = 20;
 const UPLOAD_CONCURRENCY = 3;
@@ -63,6 +65,7 @@ async function runWithConcurrency<T>(
 }
 
 function MediaLibraryContent() {
+  const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -266,6 +269,24 @@ function MediaLibraryContent() {
 
   const media = mediaQuery.data?.media ?? [];
   const empty = !mediaQuery.isLoading && media.length === 0;
+
+  const selectedReadyVideos = useMemo(
+    () =>
+      media.filter(
+        (m) => selectedIds.has(m.id) && m.type === "video" && m.status === "ready",
+      ),
+    [media, selectedIds],
+  );
+
+  function goToCreatePost() {
+    if (selectedReadyVideos.length === 0) {
+      toast.error("Select at least one ready video");
+      return;
+    }
+    const ids = selectedReadyVideos.map((m) => m.id);
+    saveBatchMediaIds(ids);
+    router.push(`/create-post?mediaIds=${ids.join(",")}`);
+  }
 
   const queueStats = useMemo(() => {
     const queued = uploads.filter((u) => u.status === "queued").length;
@@ -495,6 +516,18 @@ function MediaLibraryContent() {
           ) : null}
         </CardContent>
       </Card>
+
+      {selectedReadyVideos.length > 0 ? (
+        <div className="bg-background/95 supports-[backdrop-filter]:bg-background/80 sticky bottom-4 z-20 flex items-center justify-between gap-3 rounded-xl border px-4 py-3 shadow-lg backdrop-blur">
+          <p className="text-sm font-medium">
+            {selectedReadyVideos.length} ready video
+            {selectedReadyVideos.length === 1 ? "" : "s"} selected
+          </p>
+          <Button type="button" onClick={goToCreatePost}>
+            Next ({selectedReadyVideos.length})
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }

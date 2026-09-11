@@ -25,6 +25,7 @@ export type DestinationStatus =
 export type Post = {
   id: string;
   mediaId: string;
+  thumbnailMediaId?: string;
   caption: string;
   instagramCaption?: string;
   publishMode: "now" | "scheduled";
@@ -34,6 +35,10 @@ export type Post = {
   totalDestinations: number;
   successfulDestinations: number;
   failedDestinations: number;
+  publishOptions?: {
+    shareToFeed?: boolean;
+    hideLikeCount?: boolean;
+  };
   createdAt: string;
   updatedAt: string;
 };
@@ -102,14 +107,37 @@ export async function createPost(input: {
   socialAccountIds: string[];
   caption?: string;
   instagramCaption?: string;
+  thumbnailMediaId?: string;
   scheduledAt?: string;
   timezone?: string;
+  options?: { shareToFeed?: boolean; hideLikeCount?: boolean };
 }): Promise<{
   post: Post;
   destinations: PostDestination[];
   usedTemporaryUrl: boolean;
 }> {
   return apiFetch("/api/posts", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function createPostsBatch(input: {
+  mediaIds: string[];
+  socialAccountIds: string[];
+  caption?: string;
+  instagramCaption?: string;
+  thumbnailMediaId?: string;
+  scheduledAt?: string;
+  timezone?: string;
+  options?: { shareToFeed?: boolean; hideLikeCount?: boolean };
+}): Promise<{
+  posts: Post[];
+  total: number;
+  queuedDestinations: number;
+  usedTemporaryUrl: boolean;
+}> {
+  return apiFetch("/api/posts/batch", {
     method: "POST",
     body: JSON.stringify(input),
   });

@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { Search } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Search, X } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/layout/app-shell";
 import { AccountAvatar } from "@/components/shared/account-avatar";
@@ -15,8 +15,15 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { listMedia, type MediaAsset } from "@/lib/media-api";
-import { createPost, PostsApiError } from "@/lib/posts-api";
+import { clearBatchMediaIds, readBatchMediaIds } from "@/lib/batch-media";
+import {
+  completeMedia,
+  listMedia,
+  presignMedia,
+  uploadToR2,
+  type MediaAsset,
+} from "@/lib/media-api";
+import { createPost, createPostsBatch, PostsApiError } from "@/lib/posts-api";
 import { accountLabel, listSocialAccounts, type SocialAccount } from "@/lib/social-api";
 import { cn } from "@/lib/utils";
 
@@ -68,9 +75,7 @@ function AccountGroup({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-          {title}
-        </p>
+        <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">{title}</p>
         <button
           type="button"
           className="text-muted-foreground text-xs underline-offset-4 hover:underline"
@@ -108,16 +113,60 @@ function AccountGroup({
   );
 }
 
+async function captureFrameAsJpeg(videoUrl: string): Promise<File> {
+  const video = document.createElement("video");
+  video.crossOrigin = "anonymous";
+  video.muted = true;
+  video.playsInline = true;
+  video.src = videoUrl;
+
+  await new Promise<void>((resolve, reject) => {
+    video.onloadeddata = () => resolve();
+    video.onerror = () => reject(new Error("Failed to load video for thumbnail"));
+  });
+
+  video.currentTime = Math.min(0.5, (video.duration || 1) * 0.1);
+  await new Promise<void>((resolve) => {
+    video.onseeked = () => resolve();
+  });
+
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth || 720;
+  canvas.height = video.videoHeight || 1280;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas not supported");
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("Failed to capture frame"))),
+      "image/jpeg",
+      0.9,
+    );
+  });
+
+  return new File([blob], `thumb-${Date.now()}.jpg`, { type: "image/jpeg" });
+}
+
 function CreatePostContent() {
   const router = useRouter();
-  const [mediaId, setMediaId] = useState("");
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const searchParams = useSearchParams();
+  const queryClient = useQueryClient();
+  const frameVideoRef = useRef<HTMLVideoElement>(null);
+
+  const [selectedMediaIds, setSelectedMediaIds] = useState<string[]>([]);
+  const [accountIds, setAccountIds] = useState<Set<string>>(new Set());
   const [caption, setCaption] = useState("");
+  const [thumbnailMediaId, setThumbnailMediaId] = useState("");
+  const [frameSourceId, setFrameSourceId] = useState("");
+  const [shareToFeed, setShareToFeed] = useState(true);
+  const [hideLikeCount, setHideLikeCount] = useState(false);
   const [publishMode, setPublishMode] = useState<"now" | "scheduled">("now");
   const [scheduledAt, setScheduledAt] = useState("");
   const [timezone, setTimezone] = useState(getDefaultTimezone);
   const [accountSearch, setAccountSearch] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [capturingThumb, setCapturingThumb] = useState(false);
 
   const [minDatetime] = useState(() =>
     toLocalDatetimeString(new Date(Date.now() + 6 * 60 * 1000)),
@@ -125,6 +174,19 @@ function CreatePostContent() {
 
   const mediaQuery = useQuery({ queryKey: ["media"], queryFn: listMedia });
   const accountsQuery = useQuery({ queryKey: ["social-accounts"], queryFn: listSocialAccounts });
+
+  useEffect(() => {
+    const fromQuery = searchParams.get("mediaIds");
+    let ids: string[] = [];
+    if (fromQuery) {
+      ids = fromQuery.split(",").map((s) => s.trim()).filter(Boolean);
+    } else {
+      ids = readBatchMediaIds();
+    }
+    if (ids.length > 0) {
+      setSelectedMediaIds([...new Set(ids)].slice(0, 20));
+    }
+  }, [searchParams]);
 
   const readyVideos = useMemo(
     () =>
@@ -134,7 +196,21 @@ function CreatePostContent() {
     [mediaQuery.data],
   );
 
-  const selectedMedia = readyVideos.find((m) => m.id === mediaId);
+  const readyImages = useMemo(
+    () =>
+      (mediaQuery.data?.media ?? []).filter(
+        (m: MediaAsset) =>
+          (m.type === "image" || m.type === "thumbnail") && m.status === "ready",
+      ),
+    [mediaQuery.data],
+  );
+
+  const selectedVideos = useMemo(
+    () => readyVideos.filter((m) => selectedMediaIds.includes(m.id)),
+    [readyVideos, selectedMediaIds],
+  );
+
+  const selectedThumb = readyImages.find((m) => m.id === thumbnailMediaId);
 
   const activeAccounts = useMemo(
     () => (accountsQuery.data ?? []).filter((a) => a.status === "active"),
@@ -144,20 +220,17 @@ function CreatePostContent() {
   const filteredAccounts = useMemo(() => {
     const q = accountSearch.trim().toLowerCase();
     if (!q) return activeAccounts;
-    return activeAccounts.filter((a) =>
-      accountLabel(a).toLowerCase().includes(q),
-    );
+    return activeAccounts.filter((a) => accountLabel(a).toLowerCase().includes(q));
   }, [activeAccounts, accountSearch]);
 
   const igAccounts = filteredAccounts.filter((a) => a.platform === "instagram");
   const fbAccounts = filteredAccounts.filter((a) => a.platform === "facebook");
-
-  const selectedAccounts = activeAccounts.filter((a) => selectedIds.has(a.id));
+  const selectedAccounts = activeAccounts.filter((a) => accountIds.has(a.id));
   const igSelected = selectedAccounts.filter((a) => a.platform === "instagram").length;
   const fbSelected = selectedAccounts.filter((a) => a.platform === "facebook").length;
 
   function toggleAccount(id: string) {
-    setSelectedIds((prev) => {
+    setAccountIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -167,8 +240,8 @@ function CreatePostContent() {
 
   function toggleGroup(accounts: SocialAccount[]) {
     const ids = accounts.map((a) => a.id);
-    const allOn = ids.every((id) => selectedIds.has(id));
-    setSelectedIds((prev) => {
+    const allOn = ids.every((id) => accountIds.has(id));
+    setAccountIds((prev) => {
       const next = new Set(prev);
       for (const id of ids) {
         if (allOn) next.delete(id);
@@ -178,29 +251,63 @@ function CreatePostContent() {
     });
   }
 
+  function removeVideo(id: string) {
+    setSelectedMediaIds((prev) => prev.filter((x) => x !== id));
+  }
+
+  function addVideo(id: string) {
+    setSelectedMediaIds((prev) => (prev.includes(id) ? prev : [...prev, id].slice(0, 20)));
+  }
+
   const publishMutation = useMutation({
-    mutationFn: () => {
-      const payload: Parameters<typeof createPost>[0] = {
-        mediaId,
-        socialAccountIds: [...selectedIds],
+    mutationFn: async () => {
+      const payload = {
+        socialAccountIds: [...accountIds],
         caption: caption || undefined,
+        thumbnailMediaId: thumbnailMediaId || undefined,
+        options: {
+          shareToFeed,
+          hideLikeCount,
+        },
+        ...(publishMode === "scheduled" && scheduledAt
+          ? {
+              scheduledAt: new Date(scheduledAt).toISOString(),
+              timezone,
+            }
+          : {}),
       };
-      if (publishMode === "scheduled" && scheduledAt) {
-        payload.scheduledAt = new Date(scheduledAt).toISOString();
-        payload.timezone = timezone;
+
+      if (selectedMediaIds.length === 1) {
+        return {
+          mode: "single" as const,
+          data: await createPost({ mediaId: selectedMediaIds[0]!, ...payload }),
+        };
       }
-      return createPost(payload);
+      return {
+        mode: "batch" as const,
+        data: await createPostsBatch({ mediaIds: selectedMediaIds, ...payload }),
+      };
     },
-    onSuccess: (data) => {
+    onSuccess: (result) => {
+      clearBatchMediaIds();
+      if (result.mode === "single") {
+        toast.success(
+          publishMode === "scheduled"
+            ? `Scheduled for ${result.data.destinations.length} destination(s)`
+            : `Publishing to ${result.data.destinations.length} destination(s)`,
+        );
+        if (result.data.usedTemporaryUrl) {
+          toast.message("Using temporary R2 URL — set R2_PUBLIC_URL for reliable Meta fetches");
+        }
+        router.push(`/posts/${result.data.post.id}`);
+        return;
+      }
       toast.success(
         publishMode === "scheduled"
-          ? `Scheduled for ${data.destinations.length} destination${data.destinations.length === 1 ? "" : "s"}`
-          : `Publishing to ${data.destinations.length} destination${data.destinations.length === 1 ? "" : "s"}`,
+          ? `Scheduled ${result.data.total} posts (${result.data.queuedDestinations} destinations)`
+          : `Queued ${result.data.total} posts (${result.data.queuedDestinations} destinations). Publishing continues in the background.`,
       );
-      if (data.usedTemporaryUrl) {
-        toast.message("Using temporary R2 URL — set R2_PUBLIC_URL for reliable Meta fetches");
-      }
-      router.push(`/posts/${data.post.id}`);
+      router.push("/posts");
     },
     onError: (error: Error) => {
       toast.error(error.message);
@@ -210,9 +317,43 @@ function CreatePostContent() {
     },
   });
 
+  async function uploadCapturedThumb() {
+    const source =
+      selectedVideos.find((v) => v.id === frameSourceId) ?? selectedVideos[0];
+    if (!source) {
+      toast.error("Select a video first");
+      return;
+    }
+    setCapturingThumb(true);
+    try {
+      const file = await captureFrameAsJpeg(source.publicUrl);
+      const presign = await presignMedia({
+        originalFilename: file.name,
+        mimeType: file.type,
+        fileSize: file.size,
+        type: "thumbnail",
+      });
+      await uploadToR2(presign.uploadUrl, file, file.type);
+      const { media } = await completeMedia({
+        r2Key: presign.r2Key,
+        originalFilename: file.name,
+        mimeType: file.type,
+        fileSize: file.size,
+        type: "thumbnail",
+      });
+      await queryClient.invalidateQueries({ queryKey: ["media"] });
+      setThumbnailMediaId(media.id);
+      toast.success("Thumbnail captured and selected");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Thumbnail capture failed");
+    } finally {
+      setCapturingThumb(false);
+    }
+  }
+
   const canSubmit =
-    Boolean(mediaId) &&
-    selectedIds.size > 0 &&
+    selectedMediaIds.length > 0 &&
+    accountIds.size > 0 &&
     !publishMutation.isPending &&
     (publishMode === "now" || Boolean(scheduledAt));
 
@@ -224,60 +365,86 @@ function CreatePostContent() {
         })
       : null;
 
+  const unselectedReady = readyVideos.filter((m) => !selectedMediaIds.includes(m.id));
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Create Post"
-        description="Upload content and publish it across your connected accounts."
+        description="Publish one or many videos with the same caption, thumbnail, and destinations. Jobs continue in the background if you leave this page."
       />
 
       <div className="grid gap-6 lg:grid-cols-5">
         <div className="space-y-5 lg:col-span-3">
           <Card className="shadow-none">
             <CardHeader>
-              <CardTitle>1. Media</CardTitle>
+              <CardTitle>
+                1. Selected videos ({selectedVideos.length})
+              </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {mediaQuery.isLoading ? (
-                <p className="text-muted-foreground text-sm">Loading media…</p>
-              ) : null}
-              {readyVideos.length > 0 ? (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {readyVideos.map((m) => (
-                    <MediaPreview
-                      key={m.id}
-                      publicUrl={m.publicUrl}
-                      type={m.type}
-                      filename={m.originalFilename}
-                      fileSize={m.fileSize}
-                      selected={mediaId === m.id}
-                      onSelect={() => setMediaId(m.id)}
-                    />
+              {selectedVideos.length === 0 ? (
+                <p className="text-muted-foreground text-sm">
+                  No videos selected.{" "}
+                  <Link href="/media" className="underline underline-offset-4">
+                    Pick from Media Library
+                  </Link>{" "}
+                  or add below.
+                </p>
+              ) : (
+                <div className="flex gap-3 overflow-x-auto pb-1">
+                  {selectedVideos.map((m) => (
+                    <div key={m.id} className="relative w-40 shrink-0">
+                      <button
+                        type="button"
+                        className="bg-background absolute top-2 right-2 z-10 rounded-full border p-1 shadow"
+                        onClick={() => removeVideo(m.id)}
+                        aria-label={`Remove ${m.originalFilename}`}
+                      >
+                        <X className="size-3.5" />
+                      </button>
+                      <MediaPreview
+                        publicUrl={m.publicUrl}
+                        type={m.type}
+                        filename={m.originalFilename}
+                        fileSize={m.fileSize}
+                      />
+                    </div>
                   ))}
                 </div>
-              ) : null}
-              {readyVideos.length === 0 && !mediaQuery.isLoading ? (
-                <p className="text-muted-foreground text-xs">
-                  No ready videos.{" "}
-                  <Link href="/media" className="underline underline-offset-4">
-                    Upload in Media Library
-                  </Link>
-                  .
-                </p>
+              )}
+
+              {unselectedReady.length > 0 ? (
+                <div className="space-y-2">
+                  <p className="text-muted-foreground text-xs">Add more ready videos</p>
+                  <div className="flex flex-wrap gap-2">
+                    {unselectedReady.slice(0, 12).map((m) => (
+                      <Button
+                        key={m.id}
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => addVideo(m.id)}
+                      >
+                        + {m.originalFilename.slice(0, 24)}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
               ) : null}
             </CardContent>
           </Card>
 
           <Card className="shadow-none">
             <CardHeader>
-              <CardTitle>2. Caption</CardTitle>
+              <CardTitle>2. Caption (same for all)</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2">
               <textarea
                 className="border-input bg-background min-h-28 w-full rounded-lg border px-3 py-2 text-sm"
                 value={caption}
                 onChange={(e) => setCaption(e.target.value)}
-                placeholder="Write a caption for this post…"
+                placeholder="Write a caption for this batch…"
                 maxLength={2200}
               />
               <p className="text-muted-foreground text-right text-xs">{caption.length}/2200</p>
@@ -286,7 +453,111 @@ function CreatePostContent() {
 
           <Card className="shadow-none">
             <CardHeader>
-              <CardTitle>3. Destinations</CardTitle>
+              <CardTitle>3. Thumbnail (one for all videos)</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-muted-foreground text-xs">
+                Optional. Used as cover/thumb where Instagram/Facebook allow.
+              </p>
+              {selectedThumb ? (
+                <div className="max-w-xs">
+                  <MediaPreview
+                    publicUrl={selectedThumb.publicUrl}
+                    type={selectedThumb.type}
+                    filename={selectedThumb.originalFilename}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    onClick={() => setThumbnailMediaId("")}
+                  >
+                    Clear thumbnail
+                  </Button>
+                </div>
+              ) : null}
+
+              {readyImages.length > 0 ? (
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {readyImages.map((img) => (
+                    <MediaPreview
+                      key={img.id}
+                      publicUrl={img.publicUrl}
+                      type={img.type}
+                      filename={img.originalFilename}
+                      selected={thumbnailMediaId === img.id}
+                      onSelect={() => setThumbnailMediaId(img.id)}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <p className="text-muted-foreground text-xs">
+                  No images in library yet. Capture a frame from a selected video:
+                </p>
+              )}
+
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="min-w-[12rem] flex-1 space-y-1">
+                  <Label htmlFor="frame-source">Capture frame from</Label>
+                  <select
+                    id="frame-source"
+                    className="border-input bg-background h-9 w-full rounded-lg border px-2 text-sm"
+                    value={frameSourceId || selectedVideos[0]?.id || ""}
+                    onChange={(e) => setFrameSourceId(e.target.value)}
+                  >
+                    {selectedVideos.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.originalFilename}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={capturingThumb || selectedVideos.length === 0}
+                  onClick={() => void uploadCapturedThumb()}
+                >
+                  {capturingThumb ? "Capturing…" : "Use video frame"}
+                </Button>
+              </div>
+              <video ref={frameVideoRef} className="hidden" muted playsInline />
+            </CardContent>
+          </Card>
+
+          <Card className="shadow-none">
+            <CardHeader>
+              <CardTitle>4. Reach options</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  className="size-4"
+                  checked={shareToFeed}
+                  onChange={(e) => setShareToFeed(e.target.checked)}
+                />
+                Share to Feed (Instagram Reels)
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  className="size-4"
+                  checked={hideLikeCount}
+                  onChange={(e) => setHideLikeCount(e.target.checked)}
+                />
+                Hide like count (where platform allows)
+              </label>
+              <p className="text-muted-foreground text-xs">
+                Unsupported options are skipped automatically during publish.
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card className="shadow-none">
+            <CardHeader>
+              <CardTitle>5. Destinations</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="relative">
@@ -313,89 +584,76 @@ function CreatePostContent() {
                   <AccountGroup
                     title="Instagram"
                     accounts={igAccounts}
-                    selectedIds={selectedIds}
+                    selectedIds={accountIds}
                     onToggle={toggleAccount}
                     onToggleGroup={toggleGroup}
                   />
                   <AccountGroup
                     title="Facebook Pages"
                     accounts={fbAccounts}
-                    selectedIds={selectedIds}
+                    selectedIds={accountIds}
                     onToggle={toggleAccount}
                     onToggleGroup={toggleGroup}
                   />
                 </>
               )}
-              <p className="text-muted-foreground sticky bottom-0 rounded-lg border bg-card px-3 py-2 text-xs">
-                {selectedIds.size} account{selectedIds.size === 1 ? "" : "s"} selected
-              </p>
             </CardContent>
           </Card>
 
           <Card className="shadow-none">
             <CardHeader>
-              <CardTitle>4. Publishing</CardTitle>
+              <CardTitle>6. When</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex gap-1 rounded-lg border bg-muted/40 p-1">
-                {(["now", "scheduled"] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setPublishMode(mode)}
-                    className={cn(
-                      "flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                      publishMode === mode
-                        ? "bg-card text-foreground shadow-sm"
-                        : "text-muted-foreground",
-                    )}
-                  >
-                    {mode === "now" ? "Publish now" : "Schedule"}
-                  </button>
-                ))}
+            <CardContent className="space-y-3">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={publishMode === "now" ? "default" : "outline"}
+                  onClick={() => setPublishMode("now")}
+                >
+                  Publish now
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={publishMode === "scheduled" ? "default" : "outline"}
+                  onClick={() => setPublishMode("scheduled")}
+                >
+                  Schedule
+                </Button>
               </div>
-              {publishMode === "now" ? (
-                <p className="text-muted-foreground text-sm">
-                  Destinations will be queued and published as soon as the worker is available.
-                </p>
-              ) : (
+              {publishMode === "scheduled" ? (
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="space-y-2">
+                  <div className="space-y-1">
                     <Label htmlFor="scheduledAt">Date & time</Label>
                     <Input
-                      type="datetime-local"
                       id="scheduledAt"
-                      className="h-10"
-                      value={scheduledAt}
+                      type="datetime-local"
                       min={minDatetime}
+                      value={scheduledAt}
                       onChange={(e) => setScheduledAt(e.target.value)}
                     />
                   </div>
-                  <div className="space-y-2">
+                  <div className="space-y-1">
                     <Label htmlFor="timezone">Timezone</Label>
                     <select
                       id="timezone"
-                      className="border-input bg-background h-10 w-full rounded-lg border px-3 text-sm"
+                      className="border-input bg-background h-9 w-full rounded-lg border px-2 text-sm"
                       value={timezone}
                       onChange={(e) => setTimezone(e.target.value)}
                     >
-                      {COMMON_TIMEZONES.map((tz) => (
-                        <option key={tz} value={tz}>
-                          {tz}
-                        </option>
-                      ))}
-                      {!COMMON_TIMEZONES.includes(timezone) ? (
-                        <option value={timezone}>{timezone}</option>
-                      ) : null}
+                      {[timezone, ...COMMON_TIMEZONES.filter((tz) => tz !== timezone)].map(
+                        (tz) => (
+                          <option key={tz} value={tz}>
+                            {tz}
+                          </option>
+                        ),
+                      )}
                     </select>
                   </div>
-                  {schedulePreview ? (
-                    <p className="text-muted-foreground sm:col-span-2 text-sm">
-                      Will publish around {schedulePreview} ({timezone})
-                    </p>
-                  ) : null}
                 </div>
-              )}
+              ) : null}
             </CardContent>
           </Card>
         </div>
@@ -403,94 +661,70 @@ function CreatePostContent() {
         <div className="lg:col-span-2">
           <Card className="sticky top-20 shadow-none">
             <CardHeader>
-              <CardTitle>Post summary</CardTitle>
+              <CardTitle>Summary</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-4 text-sm">
-              <div className="space-y-2 rounded-xl border bg-muted/20 p-3">
-                <div className="flex justify-between gap-2">
-                  <span className="text-muted-foreground">Media</span>
-                  <span>{selectedMedia ? selectedMedia.originalFilename : "Not selected"}</span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span className="text-muted-foreground">Destinations</span>
-                  <span>{selectedIds.size} accounts</span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span className="text-muted-foreground">Instagram</span>
-                  <span>{igSelected}</span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span className="text-muted-foreground">Facebook</span>
-                  <span>{fbSelected}</span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span className="text-muted-foreground">Publishing</span>
-                  <span className="capitalize">{publishMode === "now" ? "Now" : "Scheduled"}</span>
-                </div>
-                {schedulePreview ? (
-                  <div className="flex justify-between gap-2">
-                    <span className="text-muted-foreground">When</span>
-                    <span className="text-right">{schedulePreview}</span>
-                  </div>
-                ) : null}
-              </div>
-
+            <CardContent className="space-y-3 text-sm">
+              <p>
+                <span className="text-muted-foreground">Videos </span>
+                {selectedVideos.length || "None"}
+              </p>
+              <p>
+                <span className="text-muted-foreground">Accounts </span>
+                {accountIds.size} ({igSelected} IG · {fbSelected} FB)
+              </p>
+              <p>
+                <span className="text-muted-foreground">Mode </span>
+                {publishMode === "now" ? "Publish now" : `Schedule ${schedulePreview ?? "—"}`}
+              </p>
+              <p>
+                <span className="text-muted-foreground">Thumbnail </span>
+                {selectedThumb?.originalFilename ?? "Default"}
+              </p>
+              <p className="text-muted-foreground text-xs leading-relaxed">
+                Each video becomes its own post. Publishing runs in the background — you can close
+                this page after submit.
+              </p>
               <Button
                 className="w-full"
-                size="lg"
                 disabled={!canSubmit}
-                onClick={() => {
-                  if (selectedIds.size >= 5) setConfirmOpen(true);
-                  else publishMutation.mutate();
-                }}
+                onClick={() => setConfirmOpen(true)}
               >
-                {publishMutation.isPending
-                  ? "Submitting…"
-                  : publishMode === "scheduled"
-                    ? `Schedule to ${selectedIds.size || "…"} account${selectedIds.size === 1 ? "" : "s"}`
-                    : `Publish to ${selectedIds.size || "…"} account${selectedIds.size === 1 ? "" : "s"}`}
+                {publishMode === "scheduled"
+                  ? `Schedule ${selectedVideos.length || ""} video${selectedVideos.length === 1 ? "" : "s"}`
+                  : `Publish ${selectedVideos.length || ""} video${selectedVideos.length === 1 ? "" : "s"}`}
               </Button>
-              {!canSubmit ? (
-                <p className="text-muted-foreground text-xs">
-                  Select a video and at least one account
-                  {publishMode === "scheduled" ? ", and a schedule time" : ""}.
-                </p>
-              ) : null}
+              <Link href="/media" className="text-muted-foreground block text-center text-xs underline">
+                Back to Media Library
+              </Link>
             </CardContent>
           </Card>
         </div>
       </div>
 
       {confirmOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <button
-            type="button"
-            className="absolute inset-0 bg-black/40"
-            aria-label="Close"
-            onClick={() => setConfirmOpen(false)}
-          />
-          <div className="relative z-10 w-full max-w-md rounded-2xl border bg-card p-6 shadow-xl">
-            <h2 className="text-lg font-semibold">
-              {publishMode === "scheduled" ? "Schedule this post?" : "Publish this post?"}
-            </h2>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-background w-full max-w-md rounded-xl border p-5 shadow-xl">
+            <h2 className="text-lg font-semibold">Confirm publish</h2>
             <p className="text-muted-foreground mt-2 text-sm">
-              This will create {selectedIds.size} publishing destination
-              {selectedIds.size === 1 ? "" : "s"}
+              Queue {selectedVideos.length} post{selectedVideos.length === 1 ? "" : "s"} to{" "}
+              {accountIds.size} account{accountIds.size === 1 ? "" : "s"}
               {publishMode === "scheduled" && schedulePreview
-                ? ` for ${schedulePreview}`
-                : ""}.
+                ? ` at ${schedulePreview}`
+                : " now"}
+              . Background workers keep going if you leave.
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <Button variant="outline" onClick={() => setConfirmOpen(false)}>
                 Cancel
               </Button>
               <Button
+                disabled={publishMutation.isPending}
                 onClick={() => {
                   setConfirmOpen(false);
                   publishMutation.mutate();
                 }}
               >
-                Confirm
+                {publishMutation.isPending ? "Queuing…" : "Confirm"}
               </Button>
             </div>
           </div>
@@ -503,7 +737,9 @@ function CreatePostContent() {
 export default function CreatePostPage() {
   return (
     <AppShell title="Create Post">
-      <CreatePostContent />
+      <Suspense fallback={<div className="text-muted-foreground p-6 text-sm">Loading…</div>}>
+        <CreatePostContent />
+      </Suspense>
     </AppShell>
   );
 }
