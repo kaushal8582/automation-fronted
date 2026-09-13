@@ -2,7 +2,7 @@ import { API_BASE_URL } from "@/lib/api";
 
 export type MediaAsset = {
   id: string;
-  type: "video" | "image" | "thumbnail";
+  type: "video" | "image" | "thumbnail" | "audio";
   originalFilename: string;
   r2Key: string;
   publicUrl: string;
@@ -12,6 +12,14 @@ export type MediaAsset = {
   width?: number;
   height?: number;
   status: "uploading" | "ready" | "failed";
+  sourceType?: string;
+  sourcePlatform?: string;
+  sourceExternalId?: string;
+  sourceCaption?: string;
+  sourceTitle?: string;
+  sourcePostUrl?: string;
+  sourceThumbnail?: string;
+  importedAt?: string;
   createdAt: string;
   updatedAt: string;
 };

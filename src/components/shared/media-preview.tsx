@@ -1,13 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { Play } from "lucide-react";
+import { Music, Play } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/media-api";
 
 type MediaPreviewProps = {
   publicUrl: string;
-  type: "video" | "image" | "thumbnail" | string;
+  type: "video" | "image" | "thumbnail" | "audio" | string;
   filename?: string;
   fileSize?: number;
   className?: string;
@@ -30,9 +30,23 @@ export function MediaPreview({
   showMeta = true,
 }: MediaPreviewProps) {
   const [playing, setPlaying] = useState(false);
-  const isVideo = type === "video" || /\.(mp4|mov|webm)(\?|$)/i.test(publicUrl);
+  const isAudio =
+    type === "audio" || /\.(mp3|m4a|aac|wav|ogg)(\?|$)/i.test(publicUrl);
+  const isVideo =
+    !isAudio && (type === "video" || /\.(mp4|mov|webm)(\?|$)/i.test(publicUrl));
 
-  const media = isVideo ? (
+  const media = isAudio ? (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-b from-zinc-100 to-zinc-200 p-4 dark:from-zinc-800 dark:to-zinc-900">
+      <Music className="text-muted-foreground size-8" />
+      <audio
+        src={publicUrl}
+        controls
+        className="w-full max-w-xs"
+        preload="metadata"
+        onClick={(e) => e.stopPropagation()}
+      />
+    </div>
+  ) : isVideo ? (
     playing || variant === "inline" ? (
       <video
         src={publicUrl}

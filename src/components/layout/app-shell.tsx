@@ -6,6 +6,7 @@ import { useState, type ReactNode } from "react";
 import {
   Activity,
   CalendarDays,
+  Download,
   FileVideo,
   LayoutDashboard,
   Library,
@@ -29,6 +30,7 @@ const NAV = [
   { href: "/calendar", label: "Calendar", icon: CalendarDays },
   { href: "/posts", label: "Posts", icon: FileVideo },
   { href: "/media", label: "Media Library", icon: Library },
+  { href: "/media/import", label: "Import Content", icon: Download },
   { href: "/activity", label: "Activity", icon: Activity },
   { href: "/accounts", label: "Accounts", icon: Users },
 ];
@@ -39,9 +41,16 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <nav className="flex flex-1 flex-col gap-1 px-3">
       {NAV.map((item) => {
+        const moreSpecificMatch = NAV.some(
+          (other) =>
+            other.href !== item.href &&
+            other.href.startsWith(`${item.href}/`) &&
+            (pathname === other.href || pathname.startsWith(`${other.href}/`)),
+        );
         const active =
-          pathname === item.href ||
-          (item.href !== "/dashboard" && pathname.startsWith(item.href));
+          !moreSpecificMatch &&
+          (pathname === item.href ||
+            (item.href !== "/dashboard" && pathname.startsWith(`${item.href}/`)));
         const Icon = item.icon;
         return (
           <Link

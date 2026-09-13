@@ -333,9 +333,14 @@ function MediaLibraryContent() {
         title="Media Library"
         description={`Upload videos and images to Cloudflare R2. Up to ${MAX_BATCH_FILES} files at once (${UPLOAD_CONCURRENCY} concurrent). Max ${formatBytes(maxBytes)} each.`}
         actions={
-          <Button type="button" disabled={isUploadingBatch} onClick={() => inputRef.current?.click()}>
-            {isUploadingBatch ? "Uploading…" : "Upload Media"}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" onClick={() => router.push("/media/import")}>
+              Import Content
+            </Button>
+            <Button type="button" disabled={isUploadingBatch} onClick={() => inputRef.current?.click()}>
+              {isUploadingBatch ? "Uploading…" : "Upload Media"}
+            </Button>
+          </div>
         }
       />
 

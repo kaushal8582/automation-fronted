@@ -3,16 +3,17 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Search, X } from "lucide-react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Search, Upload, X } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/layout/app-shell";
 import { AccountAvatar } from "@/components/shared/account-avatar";
+import { InstagramLinkImporter } from "@/components/shared/instagram-link-importer";
 import { MediaPreview } from "@/components/shared/media-preview";
 import { PageHeader } from "@/components/shared/page-header";
 import { PlatformIcon } from "@/components/shared/platform-icon";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { clearBatchMediaIds, readBatchMediaIds } from "@/lib/batch-media";
@@ -26,6 +27,8 @@ import {
 import { createPost, createPostsBatch, PostsApiError } from "@/lib/posts-api";
 import { accountLabel, listSocialAccounts, type SocialAccount } from "@/lib/social-api";
 import { cn } from "@/lib/utils";
+
+type MediaSourceTab = "upload" | "library" | "instagram";
 
 const COMMON_TIMEZONES = [
   "UTC",
@@ -167,6 +170,9 @@ function CreatePostContent() {
   const [accountSearch, setAccountSearch] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [capturingThumb, setCapturingThumb] = useState(false);
+  const [mediaTab, setMediaTab] = useState<MediaSourceTab>("library");
+  const [uploading, setUploading] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const [minDatetime] = useState(() =>
     toLocalDatetimeString(new Date(Date.now() + 6 * 60 * 1000)),
@@ -209,6 +215,18 @@ function CreatePostContent() {
     () => readyVideos.filter((m) => selectedMediaIds.includes(m.id)),
     [readyVideos, selectedMediaIds],
   );
+
+  // Prefill caption once from imported source caption when arriving via mediaIds
+  useEffect(() => {
+    if (!searchParams.get("mediaIds") && readBatchMediaIds().length === 0) return;
+    if (caption.trim()) return;
+    const imported = selectedVideos.find((m) => m.sourceCaption?.trim());
+    if (imported?.sourceCaption) {
+      setCaption(imported.sourceCaption);
+    }
+    // Intentionally only when selected videos resolve from library
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedVideos]);
 
   const selectedThumb = readyImages.find((m) => m.id === thumbnailMediaId);
 
@@ -257,6 +275,86 @@ function CreatePostContent() {
 
   function addVideo(id: string) {
     setSelectedMediaIds((prev) => (prev.includes(id) ? prev : [...prev, id].slice(0, 20)));
+  }
+
+  const handleInstagramImported = useCallback(
+    (mediaIds: string[], meta?: { title?: string; caption?: string }) => {
+      void (async () => {
+        await queryClient.invalidateQueries({ queryKey: ["media"] });
+        const fresh = await queryClient.fetchQuery({ queryKey: ["media"], queryFn: listMedia });
+        const videos = (fresh?.media ?? []).filter(
+          (m) => mediaIds.includes(m.id) && m.type === "video" && m.status === "ready",
+        );
+        const videoIds = videos.map((m) => m.id);
+        const otherCount = mediaIds.length - videoIds.length;
+        if (videoIds.length > 0) {
+          setSelectedMediaIds((prev) => [...new Set([...prev, ...videoIds])].slice(0, 20));
+        }
+        if (meta?.caption?.trim()) {
+          setCaption((prev) => (prev.trim() ? prev : meta.caption!.trim()));
+        }
+        setMediaTab("library");
+        if (videoIds.length > 0) {
+          toast.success(
+            `Added ${videoIds.length} imported video${videoIds.length === 1 ? "" : "s"} to post` +
+              (otherCount > 0
+                ? ` (${otherCount} other file${otherCount === 1 ? "" : "s"} saved to Media Library)`
+                : ""),
+          );
+        } else if (otherCount > 0) {
+          toast.success(
+            `Saved ${otherCount} file${otherCount === 1 ? "" : "s"} to Media Library. Create Post publishes the video (audio is already inside the MP4).`,
+          );
+        }
+      })();
+    },
+    [queryClient],
+  );
+
+  async function handleLocalUpload(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    const list = Array.from(files).slice(0, 10);
+    setUploading(true);
+    try {
+      const added: string[] = [];
+      for (const file of list) {
+        const type = file.type.startsWith("video/")
+          ? "video"
+          : file.type.startsWith("image/")
+            ? "image"
+            : null;
+        if (!type) {
+          toast.error(`Unsupported file: ${file.name}`);
+          continue;
+        }
+        const presign = await presignMedia({
+          originalFilename: file.name,
+          mimeType: file.type,
+          fileSize: file.size,
+          type,
+        });
+        await uploadToR2(presign.uploadUrl, file, file.type);
+        const { media } = await completeMedia({
+          r2Key: presign.r2Key,
+          originalFilename: file.name,
+          mimeType: file.type,
+          fileSize: file.size,
+          type,
+        });
+        if (type === "video") added.push(media.id);
+      }
+      await queryClient.invalidateQueries({ queryKey: ["media"] });
+      if (added.length > 0) {
+        setSelectedMediaIds((prev) => [...new Set([...prev, ...added])].slice(0, 20));
+        toast.success(`Uploaded ${added.length} video${added.length === 1 ? "" : "s"}`);
+        setMediaTab("library");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Upload failed");
+    } finally {
+      setUploading(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    }
   }
 
   const publishMutation = useMutation({
@@ -372,6 +470,11 @@ function CreatePostContent() {
       <PageHeader
         title="Create Post"
         description="Publish one or many videos with the same caption, thumbnail, and destinations. Jobs continue in the background if you leave this page."
+        actions={
+          <Link href="/media/import" className="text-muted-foreground text-sm underline-offset-4 hover:underline">
+            Import Content
+          </Link>
+        }
       />
 
       <div className="grid gap-6 lg:grid-cols-5">
@@ -379,62 +482,134 @@ function CreatePostContent() {
           <Card className="shadow-none">
             <CardHeader>
               <CardTitle>
-                1. Selected videos ({selectedVideos.length})
+                {mediaTab === "instagram"
+                  ? "Import Instagram link"
+                  : `1. Media (${selectedVideos.length})`}
               </CardTitle>
+              {mediaTab === "instagram" ? (
+                <CardDescription>
+                  Paste → preview → choose accounts → upload. Download and publish stay on this page.
+                </CardDescription>
+              ) : null}
             </CardHeader>
-            <CardContent className="space-y-3">
-              {selectedVideos.length === 0 ? (
-                <p className="text-muted-foreground text-sm">
-                  No videos selected.{" "}
-                  <Link href="/media" className="underline underline-offset-4">
-                    Pick from Media Library
-                  </Link>{" "}
-                  or add below.
-                </p>
-              ) : (
-                <div className="flex gap-3 overflow-x-auto pb-1">
-                  {selectedVideos.map((m) => (
-                    <div key={m.id} className="relative w-40 shrink-0">
-                      <button
-                        type="button"
-                        className="bg-background absolute top-2 right-2 z-10 rounded-full border p-1 shadow"
-                        onClick={() => removeVideo(m.id)}
-                        aria-label={`Remove ${m.originalFilename}`}
-                      >
-                        <X className="size-3.5" />
-                      </button>
-                      <MediaPreview
-                        publicUrl={m.publicUrl}
-                        type={m.type}
-                        filename={m.originalFilename}
-                        fileSize={m.fileSize}
-                      />
-                    </div>
-                  ))}
-                </div>
-              )}
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                {(
+                  [
+                    ["upload", "Upload"],
+                    ["library", "Media Library"],
+                    ["instagram", "Import Instagram Link"],
+                  ] as const
+                ).map(([id, label]) => (
+                  <Button
+                    key={id}
+                    type="button"
+                    size="sm"
+                    variant={mediaTab === id ? "default" : "outline"}
+                    onClick={() => setMediaTab(id)}
+                  >
+                    {id === "upload" ? <Upload className="size-3.5" /> : null}
+                    {label}
+                  </Button>
+                ))}
+              </div>
 
-              {unselectedReady.length > 0 ? (
-                <div className="space-y-2">
-                  <p className="text-muted-foreground text-xs">Add more ready videos</p>
-                  <div className="flex flex-wrap gap-2">
-                    {unselectedReady.slice(0, 12).map((m) => (
-                      <Button
-                        key={m.id}
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => addVideo(m.id)}
-                      >
-                        + {m.originalFilename.slice(0, 24)}
-                      </Button>
-                    ))}
-                  </div>
+              {mediaTab === "upload" ? (
+                <div className="space-y-3 rounded-xl border border-dashed p-4">
+                  <p className="text-muted-foreground text-sm">
+                    Upload videos or images to your library, then add them to this post.
+                  </p>
+                  <input
+                    ref={uploadInputRef}
+                    type="file"
+                    accept="video/mp4,video/quicktime,image/jpeg,image/png,image/webp"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => void handleLocalUpload(e.target.files)}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={uploading}
+                    onClick={() => uploadInputRef.current?.click()}
+                  >
+                    {uploading ? "Uploading…" : "Choose files"}
+                  </Button>
+                </div>
+              ) : null}
+
+              {mediaTab === "instagram" ? (
+                <InstagramLinkImporter
+                  compact
+                  onComplete={(result) => {
+                    if (result.postIds && result.postIds.length > 0) {
+                      // Published from the importer itself — stay on this page / go posts via CTA
+                      return;
+                    }
+                    handleInstagramImported(result.mediaIds, {
+                      title: result.title,
+                      caption: result.caption,
+                    });
+                  }}
+                  onViewLibrary={() => router.push("/media")}
+                />
+              ) : null}
+
+              {mediaTab === "library" || (mediaTab !== "instagram" && selectedVideos.length > 0) ? (
+                <div className="space-y-3">
+                  {selectedVideos.length === 0 ? (
+                    <p className="text-muted-foreground text-sm">
+                      No videos selected. Pick from your library below, upload, or import an
+                      Instagram link.
+                    </p>
+                  ) : (
+                    <div className="flex gap-3 overflow-x-auto pb-1">
+                      {selectedVideos.map((m) => (
+                        <div key={m.id} className="relative w-40 shrink-0">
+                          <button
+                            type="button"
+                            className="bg-background absolute top-2 right-2 z-10 rounded-full border p-1 shadow"
+                            onClick={() => removeVideo(m.id)}
+                            aria-label={`Remove ${m.originalFilename}`}
+                          >
+                            <X className="size-3.5" />
+                          </button>
+                          <MediaPreview
+                            publicUrl={m.publicUrl}
+                            type={m.type}
+                            filename={m.originalFilename}
+                            fileSize={m.fileSize}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {mediaTab === "library" && unselectedReady.length > 0 ? (
+                    <div className="space-y-2">
+                      <p className="text-muted-foreground text-xs">Add ready videos from library</p>
+                      <div className="flex flex-wrap gap-2">
+                        {unselectedReady.slice(0, 12).map((m) => (
+                          <Button
+                            key={m.id}
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => addVideo(m.id)}
+                          >
+                            + {m.originalFilename.slice(0, 24)}
+                          </Button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </CardContent>
           </Card>
 
+          {mediaTab !== "instagram" ? (
+            <>
           <Card className="shadow-none">
             <CardHeader>
               <CardTitle>2. Caption (same for all)</CardTitle>
@@ -447,7 +622,29 @@ function CreatePostContent() {
                 placeholder="Write a caption for this batch…"
                 maxLength={2200}
               />
-              <p className="text-muted-foreground text-right text-xs">{caption.length}/2200</p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                {selectedVideos.some((m) => m.sourceCaption?.trim()) ? (
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const source = selectedVideos.find((m) => m.sourceCaption?.trim())?.sourceCaption;
+                        if (source) setCaption(source);
+                      }}
+                    >
+                      Use original caption
+                    </Button>
+                    <Button type="button" size="sm" variant="outline" onClick={() => setCaption("")}>
+                      Clear caption
+                    </Button>
+                  </div>
+                ) : (
+                  <span />
+                )}
+                <p className="text-muted-foreground text-xs">{caption.length}/2200</p>
+              </div>
             </CardContent>
           </Card>
 
@@ -656,8 +853,11 @@ function CreatePostContent() {
               ) : null}
             </CardContent>
           </Card>
+            </>
+          ) : null}
         </div>
 
+        {mediaTab !== "instagram" ? (
         <div className="lg:col-span-2">
           <Card className="sticky top-20 shadow-none">
             <CardHeader>
@@ -699,6 +899,21 @@ function CreatePostContent() {
             </CardContent>
           </Card>
         </div>
+        ) : (
+          <div className="lg:col-span-2">
+            <Card className="sticky top-20 shadow-none">
+              <CardHeader>
+                <CardTitle>Same-page upload</CardTitle>
+              </CardHeader>
+              <CardContent className="text-muted-foreground space-y-2 text-sm">
+                <p>1. Paste an Instagram link and preview</p>
+                <p>2. Choose Instagram / Facebook accounts</p>
+                <p>3. Confirm rights and hit Upload</p>
+                <p>Download, save, and publish all run here — no extra steps.</p>
+              </CardContent>
+            </Card>
+          </div>
+        )}
       </div>
 
       {confirmOpen ? (

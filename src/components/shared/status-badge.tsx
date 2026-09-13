@@ -20,6 +20,11 @@ const LABEL: Record<string, string> = {
   revoked: "Revoked",
   error: "Error",
   reconnect_required: "Reconnect required",
+  completed: "Imported",
+  already_imported: "Already imported",
+  fetching_metadata: "Fetching metadata",
+  downloading: "Downloading",
+  uploading_to_r2: "Uploading",
 };
 
 function tone(status: string): string {
@@ -38,9 +43,15 @@ function tone(status: string): string {
     case "processing":
     case "publishing":
     case "uploading":
+    case "uploading_to_r2":
     case "processing_media":
     case "ready_to_publish":
+    case "fetching_metadata":
+    case "downloading":
       return "bg-violet-50 text-violet-800 ring-violet-200 dark:bg-violet-950/40 dark:text-violet-300 dark:ring-violet-900";
+    case "completed":
+    case "already_imported":
+      return "bg-emerald-50 text-emerald-800 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-900";
     case "partially_published":
     case "expired":
     case "reconnect_required":
@@ -64,6 +75,9 @@ export function StatusBadge({
     status === "publishing" ||
     status === "queued" ||
     status === "uploading" ||
+    status === "uploading_to_r2" ||
+    status === "fetching_metadata" ||
+    status === "downloading" ||
     status === "processing_media";
 
   return (
